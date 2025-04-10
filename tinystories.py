@@ -175,12 +175,14 @@ def pretokenize(vocab_size):
 class PretokDataset(torch.utils.data.IterableDataset):
     """Loads pretokenized examples from disk and yields them as PyTorch tensors."""
 
-    def __init__(self, split, max_seq_len, vocab_size, vocab_source):
+    def __init__(self, split, max_seq_len, vocab_size, vocab_source, num_future_tokens):
         super().__init__()
         self.split = split
         self.max_seq_len = max_seq_len
         self.vocab_size = vocab_size
         self.vocab_source = vocab_source
+        self.num_future_tokens = num_future_tokens
+        self.window_size = max_seq_len - num_future_tokens # length of the sequence effectively used for training
 
     def __iter__(self):
         # get worker info within a DataLoader
@@ -218,9 +220,10 @@ class PretokDataset(torch.utils.data.IterableDataset):
                     end = start + self.max_seq_len + 1
                     # calling .astype will copy the data into a new numpy array, now in RAM
                     chunk = torch.from_numpy((m[start:end]).astype(np.int64))
-                    x = chunk[:-1]
-                    y = chunk[1:]
-                    yield x, y
+                    x = chunk[:self.window_size]
+                    ys = [chunk[i:i+self.window_size] for i in range(1, self.num_future_tokens+1)]
+                    ys_stacked = torch.stack(ys, dim=1)
+                    yield x, ys_stacked
 
 # -----------------------------------------------------------------------------
 # public interface functions

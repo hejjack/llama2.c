@@ -17,11 +17,17 @@ class ModelArgs:
     n_heads: int = 32
     n_kv_heads: Optional[int] = None
     vocab_size: int = 32000
+    vocab_source: str = "llama2"
     hidden_dim: Optional[int] = None
     multiple_of: int = 256  # MLP hidden layer size will be multiple of
     norm_eps: float = 1e-5
     max_seq_len: int = 2048
     dropout: float = 0.0
+    num_future_tokens: int = 4  # Number of future tokens to predict per output head -- m
+
+    def __post_init__(self):
+        assert self.vocab_source in ["llama2", "custom"]
+        assert self.vocab_source == "custom" or self.vocab_size == 32000, "The vocab from Meta has 32K tokens"
 
 
 class RMSNorm(torch.nn.Module):
@@ -218,10 +224,12 @@ class Transformer(nn.Module):
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
-
+        self.output_heads = nn.ModuleList([ # Adam - more heads
+            nn.Linear(params.dim, params.vocab_size, bias=False)
+            for _ in range(params.num_future_tokens)
+        ])
         # share the unembedding parameters with the embedding parameters
-        self.tok_embeddings.weight = self.output.weight # https://paperswithcode.com/method/weight-tying
+        self.tok_embeddings.weight = self.output_heads[0].weight # https://paperswithcode.com/method/weight-tying
 
         # some useful precompute for the RoPE relative positional embeddings
         freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
@@ -258,15 +266,36 @@ class Transformer(nn.Module):
         h = self.norm(h)
 
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.output(h)
-            self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            # Get predictions from each head
+            all_logits = []
+            for head in self.output_heads:
+                logits = head(h)
+                all_logits.append(logits)
+
+            # Stack logits: (batch_size, seq_len, num_predictions, vocab_size)
+            stacked_logits = torch.stack(all_logits, dim=2)
+
+            # Calculate loss across all predictions
+            loss_fct = nn.CrossEntropyLoss()
+            logits_reshaped = stacked_logits.view(-1, self.vocab_size)
+            targets_reshaped = targets.view(-1)
+            self.last_loss = loss_fct(logits_reshaped, targets_reshaped)
+
+            return stacked_logits
         else:
-            # inference-time mini-optimization: only forward the output on the very last position
-            logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            # inference-time: only forward the output on the very last position
+            # and get predictions from all heads
+            last_h = h[:, [-1], :]  # (batch_size, 1, dim)
+            all_logits = []
+            for head in self.output_heads:
+                logits = head(last_h)
+                all_logits.append(logits)
+
+            # Stack logits: (batch_size, 1, num_predictions, vocab_size)
+            stacked_logits = torch.stack(all_logits, dim=2)
             self.last_loss = None
 
-        return logits
+            return stacked_logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
