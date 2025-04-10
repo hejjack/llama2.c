@@ -79,7 +79,7 @@ def legacy_export(model, filepath):
     # first write out the header
     hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
     p = model.params
-    shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
+    shared_classifier = torch.equal(model.tok_embeddings.weight, model.output_heads[0].weight)
     # legacy format uses negative/positive vocab size as a shared classifier flag
     if not shared_classifier:
         p.vocab_size = -p.vocab_size
@@ -118,9 +118,11 @@ def legacy_export(model, filepath):
     serialize_fp32(out_file, model.freqs_cos[:p.max_seq_len])
     serialize_fp32(out_file, model.freqs_sin[:p.max_seq_len])
 
-    # final classifier weights
+    # final classifier heads weights
+    for i in range(1, p.num_future_tokens):
+        serialize_fp32(out_file, model.output_heads[i].weight)
     if not shared_classifier:
-        serialize_fp32(out_file, model.output.weight)
+        serialize_fp32(out_file, model.output_heads[0].weight)
 
     # write to binary file
     out_file.close()
@@ -134,6 +136,9 @@ def version1_export(model, filepath):
     Export the model weights in full float32 .bin file to be read from C.
     This is same as legacy_export, but with a proper header.
     """
+
+    print("WARNING: this version was not updated for Multi Token Prediction")
+
     version = 1
 
     out_file = open(filepath, 'wb')
@@ -187,6 +192,8 @@ def version2_export(model, filepath, group_size=64):
     - all other tensors (the rmsnorm params) are kept and exported in fp32
     - quantization is done in groups of group_size to reduce the effects of any outliers
     """
+
+    print("WARNING: this version was not updated for Multi Token Prediction")
     version = 2
 
     # let's first do some validation for this export type
@@ -261,6 +268,8 @@ def version2_export(model, filepath, group_size=64):
 
 def hf_export(llama_model, filepath, group_size=64, dtype=torch.float32):
     """ Generate the pytorch_model.bin state_dict and config.json for HuggingFace """
+
+    print("WARNING: this version was not updated for Multi Token Prediction")
 
     try:
         from transformers.models.llama.configuration_llama import LlamaConfig
