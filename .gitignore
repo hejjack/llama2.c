@@ -2,3 +2,4 @@ data/**
 out/**
 stories15M.bin
 wandb/**
+__pycache__/**

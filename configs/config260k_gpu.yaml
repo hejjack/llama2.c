@@ -1,0 +1,28 @@
+
+model_args:
+    dim: 64
+    n_layers: 5
+    n_heads: 8
+    n_kv_heads: 4
+    vocab_size: 32000
+    hidden_dim: null
+    multiple_of: 32
+    dropout: 0.0
+    max_seq_len: 512
+    norm_eps: 0.00005 # 1e-5 as in default
+    num_future_tokens: 2
+
+training_args:
+    out_dir: "out"
+    eval_interval: 500
+    log_interval: 1
+    eval_iters: 50
+    eval_only: False
+    init_from: "scratch"
+    device: "cuda"
+
+    wandb_log: True
+    additional_run_name_info: "_260k_2heads"
+
+
+
