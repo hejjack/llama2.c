@@ -3,7 +3,6 @@ import math
 import torch
 from datetime import datetime
 from contextlib import nullcontext
-from training_args import TrainingArgs
 from model import Transformer, ModelArgs
 from dataclasses import dataclass
 

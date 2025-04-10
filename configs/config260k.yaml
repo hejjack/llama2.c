@@ -10,49 +10,7 @@ model_args:
     dropout: 0.0
     max_seq_len: 512
     norm_eps: 0.00005 # 1e-5 as in default
-    num_future_tokens: 1
-
-
-# class TrainingArgs:
-#     # I/O
-#     out_dir: str = "out"
-#     eval_interval: int = 500
-#     log_interval: int = 1
-#     eval_iters: int = 50
-#     eval_only: bool = False  # if True, script exits right after the first eval
-#     always_save_checkpoint: bool = False  # if True, always save a checkpoint after each eval
-#     init_from: str = "scratch"  # 'scratch' or 'resume'
-
-#     # wandb logging
-#     wandb_log: bool = True  # disabled by default
-#     wandb_project: str = "bottlecap"
-#     wandb_run_name: str = "custom"  # will be appended with timestamp
-
-#     # data
-#     batch_size: int = 2  # if gradient_accumulation_steps > 1, this is the micro-batch size
-#     vocab_source: str = "llama2"  # llama2|custom; use Lllama 2 vocab from Meta, or custom trained
-
-#     # adamw optimizer
-#     gradient_accumulation_steps: int = 4  # used to simulate larger batch sizes
-#     learning_rate: float = 5e-4  # max learning rate
-#     max_iters: int = 100000  # total number of training iterations
-#     weight_decay: float = 1e-1
-#     beta1: float = 0.9
-#     beta2: float = 0.95
-#     grad_clip: float = 1.0  # clip gradients at this value, or disable if == 0.0
-
-#     # learning rate decay settings
-#     decay_lr: bool = True  # whether to decay the learning rate
-#     warmup_iters: int = 1000  # how many steps to warm up for
-
-#     # system
-#     device: str = "cpu"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-#     dtype: str = "bfloat16"  # float32|bfloat16|float16
-#     compile: bool = True  # use PyTorch 2.0 to compile the model to be faster
-
-#     # derived attributes (computed from other parameters)
-#     lr_decay_iters: Optional[int] = None  # will be set to max_iters
-#     min_lr: Optional[float] = None  # will be set to 0.0
+    num_future_tokens: 2
 
 training_args:
     out_dir: "out"
@@ -63,7 +21,7 @@ training_args:
     init_from: "scratch"
 
     wandb_log: True
-    additional_run_name_info: "_260k_1head"
+    additional_run_name_info: "_260k_2heads"
 
 
 

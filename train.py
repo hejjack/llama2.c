@@ -171,7 +171,7 @@ def main(
                         "model_args": model_args,
                         "iter_num": iter_num,
                         "best_val_loss": best_val_loss,
-                        "config": training_args.to_dict(),
+                        "config": training_args.__dict__,
                     }
                     print(f"saving checkpoint to {run_save_dir}")
                     torch.save(checkpoint, os.path.join(run_save_dir, "ckpt.pt"))
