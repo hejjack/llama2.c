@@ -147,23 +147,37 @@ def main(
         # Evaluate and save checkpoint (every `eval_interval` iterations)
         if iter_num % training_args.eval_interval == 0 and master_process:
             losses = estimate_loss(model, iter_batches, training_args.eval_iters, ctx, training_args.device)
-            print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            # in stdout print the aggregated losses of all heads
+            print(f"step {iter_num}: train loss {sum(losses['train'].values())/len(losses['train']):.4f}, val loss {sum(losses['val'].values())/len(losses['val']):.4f}")
 
             if training_args.wandb_log:
                 try:
-                    wandb.log({
+                    # Create base logging dictionary
+                    log_dict = {
                         "iter": iter_num,
                         "tokens": iter_num * tokens_per_iter,
-                        "loss/train": losses["train"],
-                        "loss/val": losses["val"],
                         "lr": lr,
                         "mfu": running_mfu * 100,
-                    }, step=iter_num)
+                    }
+
+                    # Add losses for each head
+                    for head_name, train_loss in losses["train"].items():
+                        log_dict[f"loss/train/{head_name}"] = train_loss
+                    for head_name, val_loss in losses["val"].items():
+                        log_dict[f"loss/val/{head_name}"] = val_loss
+
+                    # Add average losses
+                    log_dict["loss/train/avg"] = sum(losses["train"].values())/len(losses["train"])
+                    log_dict["loss/val/avg"] = sum(losses["val"].values())/len(losses["val"])
+
+                    wandb.log(log_dict, step=iter_num)
                 except Exception as e:
                     print(f"logging to wandb failed: {e}")
 
-            if losses["val"] < best_val_loss or training_args.always_save_checkpoint:
-                best_val_loss = losses["val"]
+            # Use average validation loss for checkpointing
+            avg_val_loss = sum(losses["val"].values())/len(losses["val"])
+            if avg_val_loss < best_val_loss or training_args.always_save_checkpoint:
+                best_val_loss = avg_val_loss
                 if iter_num > 0:
                     checkpoint = {
                         "model": raw_model.state_dict(),

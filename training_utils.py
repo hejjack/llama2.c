@@ -1,6 +1,7 @@
 import os
 import math
 import torch
+import torch.nn as nn
 from datetime import datetime
 from contextlib import nullcontext
 from model import Transformer, ModelArgs
@@ -166,19 +167,30 @@ def estimate_loss(
     eval_iters: int,
     ctx: nullcontext,
     device: str
-) -> dict[str, float]:
-    """Estimate loss on train/val sets."""
+) -> dict[str, dict[str, float]]:
+    """Estimate loss on train/val sets for each head separately."""
     out = {}
     model.eval()
     for split in ["train", "val"]:
         batch_iter = iter_batches(split=split)
-        losses = torch.zeros(eval_iters)
+        # Initialize losses for each head
+        num_heads = len(model.output_heads)
+        head_losses = {f"head_{i}": torch.zeros(eval_iters) for i in range(num_heads)}
+
+        loss_fct = nn.CrossEntropyLoss()
         for k in range(eval_iters):
             X, Y = next(batch_iter)
             with ctx:
-                logits = model(X, Y)
-                loss = model.last_loss
-            losses[k] = loss.item()
-        out[split] = losses.mean()
+                logits = model(X, Y)  # (batch_size, seq_len, num_heads, vocab_size)
+                # Compute loss for each head separately
+                for i in range(num_heads):
+                    head_logits = logits[:, :, i, :].reshape(-1, model.vocab_size)
+                    head_targets = Y[:, :, i].view(-1)
+                    head_losses[f"head_{i}"][k] = loss_fct(head_logits, head_targets)
+
+        # Compute mean loss for each head
+        split_losses = {f"head_{i}": head_losses[f"head_{i}"].mean().item() for i in range(num_heads)}
+        out[split] = split_losses
+
     model.train()
     return out

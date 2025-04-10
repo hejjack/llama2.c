@@ -224,12 +224,12 @@ class Transformer(nn.Module):
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output_heads = nn.ModuleList([ # Adam - more heads
+        self.output_heads = nn.ModuleList([
             nn.Linear(params.dim, params.vocab_size, bias=False)
             for _ in range(params.num_future_tokens)
         ])
         # share the unembedding parameters with the embedding parameters
-        self.tok_embeddings.weight = self.output_heads[0].weight # https://paperswithcode.com/method/weight-tying
+        # COMMENTED: self.tok_embeddings.weight = self.output_heads[0].weight # https://paperswithcode.com/method/weight-tying
 
         # some useful precompute for the RoPE relative positional embeddings
         freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
@@ -279,23 +279,16 @@ class Transformer(nn.Module):
             loss_fct = nn.CrossEntropyLoss()
             logits_reshaped = stacked_logits.view(-1, self.vocab_size)
             targets_reshaped = targets.view(-1)
-            self.last_loss = loss_fct(logits_reshaped, targets_reshaped)
+            self.last_loss = loss_fct(logits_reshaped, targets_reshaped) / self.params.num_future_tokens
 
             return stacked_logits
         else:
             # inference-time: only forward the output on the very last position
-            # and get predictions from all heads
+            # and only use the first head
             last_h = h[:, [-1], :]  # (batch_size, 1, dim)
-            all_logits = []
-            for head in self.output_heads:
-                logits = head(last_h)
-                all_logits.append(logits)
-
-            # Stack logits: (batch_size, 1, num_predictions, vocab_size)
-            stacked_logits = torch.stack(all_logits, dim=2)
+            logits = self.output_heads[0](last_h)  # (batch_size, 1, vocab_size)
             self.last_loss = None
-
-            return stacked_logits
+            return logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
@@ -351,8 +344,8 @@ class Transformer(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.params.max_seq_len else idx[:, -self.params.max_seq_len:]
             # forward the model to get the logits for the index in the sequence
-            logits = self(idx_cond)
-            logits = logits[:, -1, :] # crop to just the final time step
+            logits = self(idx_cond)  # (batch_size, 1, vocab_size)
+            logits = logits[:, -1, :]  # crop to just the final time step
             if temperature == 0.0:
                 # "sample" the single most likely index
                 _, idx_next = torch.topk(logits, k=1, dim=-1)
