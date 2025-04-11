@@ -1,4 +1,5 @@
-## llama2.c
+## llama2.c: Multi token prediction
+llama2.c enriched with the functionality of multi-token prediction using more language modeling heads. The original repo: https://github.com/karpathy/llama2.c
 
 <p align="center">
   <img src="assets/llama_cute.jpg" width="300" height="300" alt="Cute Llama">
