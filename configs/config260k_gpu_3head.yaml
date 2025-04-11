@@ -9,7 +9,7 @@ model_args:
     dropout: 0.0
     max_seq_len: 512
     norm_eps: 0.00005 # 1e-5 as in default
-    num_future_tokens: 4
+    num_future_tokens: 3
 
 training_args:
     out_dir: "out"
@@ -20,7 +20,8 @@ training_args:
     init_from: "scratch"
     device: "cuda"
     max_iters: 3150
+    batch_size: 8
 
     wandb_log: True
-    additional_run_name_info: "DEBUG_loss"
+    additional_run_name_info: "_BS32"
     wandb_group: "DEBUG"

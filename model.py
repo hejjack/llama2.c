@@ -269,7 +269,7 @@ class Transformer(nn.Module):
             # Get predictions from each head
             all_logits = []
             for head in self.output_heads:
-                logits = head(h)
+                logits = head(h)  # Shape: [batch_size, seq_len, vocab_size]
                 all_logits.append(logits)
 
             # Stack logits: (batch_size, seq_len, num_predictions, vocab_size)
@@ -279,7 +279,7 @@ class Transformer(nn.Module):
             loss_fct = nn.CrossEntropyLoss()
             logits_reshaped = stacked_logits.view(-1, self.vocab_size)
             targets_reshaped = targets.view(-1)
-            self.last_loss = loss_fct(logits_reshaped, targets_reshaped) / self.params.num_future_tokens
+            self.last_loss = loss_fct(logits_reshaped, targets_reshaped)
 
             return stacked_logits
         else:

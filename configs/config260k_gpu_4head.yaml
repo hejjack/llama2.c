@@ -20,7 +20,8 @@ training_args:
     init_from: "scratch"
     device: "cuda"
     max_iters: 3150
+    batch_size: 8
 
     wandb_log: True
-    additional_run_name_info: "DEBUG_loss"
+    additional_run_name_info: "_BS32"
     wandb_group: "DEBUG"

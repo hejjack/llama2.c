@@ -122,10 +122,12 @@ def main(
         # wandb
         if training_args.wandb_log:
             import wandb
-            run = setup_wandb(training_args, config)
+            run = setup_wandb(training_args, config, model_args.num_future_tokens)
             run_name = run.name
         else:
-            run_name =  "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S") + training_args.additional_info
+            run_name =  "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S") + \
+                        f"_{model_args.num_future_tokens}heads" + \
+                        training_args.additional_run_name_info
         print(f"Run name: {run_name}")
         run_save_dir = os.path.join(training_args.out_dir, run_name)
         os.makedirs(run_save_dir, exist_ok=True)

@@ -23,6 +23,7 @@ class TrainingArgs:
     wandb_log: bool = True  # disabled by default
     wandb_project: str = "bottlecap"
     wandb_run_name: str|None = None  # will be appended with timestamp
+    wandb_group: str|None = None
     additional_run_name_info: str|None = None  # will be appended with timestamp
     resume_id: str|None = None  # will be appended with timestamp
 
@@ -61,12 +62,13 @@ class TrainingArgs:
         return {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[self.dtype]
 
 
-def setup_wandb(training_args: TrainingArgs, config: dict) -> None:
+def setup_wandb(training_args: TrainingArgs, config: dict, num_future_tokens: int = None) -> None:
     """Setup wandb if requested."""
     import wandb
     run = wandb.init(
         name=training_args.wandb_run_name, # None by default -> automatic wandb name
         id=training_args.resume_id,
+        group=training_args.wandb_group,
         resume="must" if training_args.resume_id else "never",
         entity="msgc_boys",
         project=training_args.wandb_project,
@@ -75,6 +77,8 @@ def setup_wandb(training_args: TrainingArgs, config: dict) -> None:
     )
     # to not add additional info to the run name if it is already there
     if not run.name.endswith(training_args.additional_run_name_info):
+        if num_future_tokens is not None:
+            run.name = run.name + f"_{num_future_tokens}heads"
         run.name = run.name + training_args.additional_run_name_info
 
     return run
