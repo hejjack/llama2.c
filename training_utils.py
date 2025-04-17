@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from datetime import datetime
 from contextlib import nullcontext
-from model import Transformer, ModelArgs
+from model import Transformer, ModelArgs, TreeTransformer
 from dataclasses import dataclass
 
 
@@ -111,7 +111,16 @@ def setup_model_and_optimizer(model_args: ModelArgs, training_args: TrainingArgs
     """Initialize or load the model and initialize or load the optimizer."""
     if training_args.init_from == "scratch":
         print("Initializing a new model from scratch")
-        model = Transformer(model_args)
+
+        if model_args.mtp_structure == "linear":
+            print("Initializing a new linear model from scratch")
+            model = Transformer(model_args)
+        elif model_args.mtp_structure == "tree":
+            print("Initializing a new tree model from scratch")
+            model = TreeTransformer(model_args)
+        else:
+            raise ValueError(f"Invalid mtp_structure: {model_args.mtp_structure}")
+
         iter_num = 0
         best_val_loss = 1e9
     elif training_args.init_from == "resume":
@@ -123,7 +132,16 @@ def setup_model_and_optimizer(model_args: ModelArgs, training_args: TrainingArgs
         for k in ["dim", "n_layers", "n_heads", "n_kv_heads", "vocab_size", "hidden_dim", "multiple_of", "norm_eps", "max_seq_len", "dropout", "num_future_tokens"]:
             restored_model_args[k] = checkpoint_model_args[k]
         print("Model_args: ", restored_model_args)
-        model = Transformer(ModelArgs(**restored_model_args))
+
+        if model_args.mtp_structure == "linear":
+            print("Initializing a new linear model from scratch")
+            model = Transformer(ModelArgs(**restored_model_args))
+        elif model_args.mtp_structure == "tree":
+            print("Initializing a new tree model from scratch")
+            model = TreeTransformer(ModelArgs(**restored_model_args))
+        else:
+            raise ValueError(f"Invalid mtp_structure: {model_args.mtp_structure}")
+
         state_dict = checkpoint["model"]
         unwanted_prefix = "_orig_mod."
         for k, v in list(state_dict.items()):
@@ -178,7 +196,7 @@ def estimate_loss(
     for split in ["train", "val"]:
         batch_iter = iter_batches(split=split)
         # Initialize losses for each head
-        num_heads = len(model.output_heads)
+        num_heads = len(model.mtp_modules) + 1
         head_losses = {f"head_{i}": torch.zeros(eval_iters) for i in range(num_heads)}
 
         loss_fct = nn.CrossEntropyLoss()
@@ -187,10 +205,15 @@ def estimate_loss(
             with ctx:
                 logits = model(X, Y)  # (batch_size, seq_len, num_heads, vocab_size)
                 # Compute loss for each head separately
-                for i in range(num_heads):
-                    head_logits = logits[:, :, i, :].reshape(-1, model.vocab_size)
-                    head_targets = Y[:, :, i].view(-1)
-                    head_losses[f"head_{i}"][k] = loss_fct(head_logits, head_targets)
+                if model.params.num_future_tokens > 1:
+                    for i in range(num_heads):
+                        head_logits = logits[:, :, i, :].reshape(-1, model.vocab_size)
+                        head_targets = Y[:, :, i].view(-1)
+                        head_losses[f"head_{i}"][k] = loss_fct(head_logits, head_targets)
+                else:
+                    head_logits = logits.reshape(-1, model.vocab_size)
+                    head_targets = Y.view(-1)
+                    head_losses[f"head_{0}"][k] = loss_fct(head_logits, head_targets)
 
         # Compute mean loss for each head
         split_losses = {f"head_{i}": head_losses[f"head_{i}"].mean().item() for i in range(num_heads)}

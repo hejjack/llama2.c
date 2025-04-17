@@ -220,10 +220,14 @@ class PretokDataset(torch.utils.data.IterableDataset):
                     end = start + self.max_seq_len + 1
                     # calling .astype will copy the data into a new numpy array, now in RAM
                     chunk = torch.from_numpy((m[start:end]).astype(np.int64))
-                    x = chunk[:self.window_size]
-                    ys = [chunk[i:i+self.window_size] for i in range(1, self.num_future_tokens+1)]
-                    ys_stacked = torch.stack(ys, dim=1)
-                    yield x, ys_stacked
+                    x = chunk[:-1]
+
+                    if self.num_future_tokens > 1:
+                        ys = [chunk[i:i+self.window_size] for i in range(1, self.num_future_tokens+1)]
+                        ys_stacked = torch.stack(ys, dim=1)
+                        yield x, ys_stacked
+                    else:
+                        yield x, chunk[1:]
 
 # -----------------------------------------------------------------------------
 # public interface functions

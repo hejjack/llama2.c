@@ -9,8 +9,9 @@ model_args:
     dropout: 0.0
     max_seq_len: 512
     norm_eps: 0.00005 # 1e-5 as in default
-    num_future_tokens: 1
+    num_future_tokens: 3
     lambda_loss: 0.3
+    num_mtp_layers: 3
 
 training_args:
     out_dir: "out"
@@ -23,5 +24,5 @@ training_args:
     max_iters: 3150
 
     wandb_log: True
-    additional_run_name_info: "_ds_1head_test"
+    additional_run_name_info: "_mtp_layers_3"
     wandb_group: "deepseek"

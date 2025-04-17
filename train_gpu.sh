@@ -13,4 +13,4 @@ export OPENBLAS_NUM_THREADS=$NUM_CORES
 export VECLIB_MAXIMUM_THREADS=$NUM_CORES
 
 # Run the training script with taskset
-CUDA_VISIBLE_DEVICES=1 taskset -c $CORE_RANGE python train.py --config configs/config260k_gpu.yaml
+CUDA_VISIBLE_DEVICES=2 taskset -c $CORE_RANGE python train.py --config configs/config260k_gpu.yaml

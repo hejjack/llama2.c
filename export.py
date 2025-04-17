@@ -79,7 +79,7 @@ def legacy_export(model, filepath):
     # first write out the header
     hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
     p = model.params
-    shared_classifier = torch.equal(model.tok_embeddings.weight, model.output_heads[0].weight)
+    shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
     # legacy format uses negative/positive vocab size as a shared classifier flag
     if not shared_classifier:
         p.vocab_size = -p.vocab_size
@@ -118,11 +118,9 @@ def legacy_export(model, filepath):
     serialize_fp32(out_file, model.freqs_cos[:p.max_seq_len])
     serialize_fp32(out_file, model.freqs_sin[:p.max_seq_len])
 
-    # final classifier heads weights
-    for i in range(1, p.num_future_tokens):
-        serialize_fp32(out_file, model.output_heads[i].weight)
+    # final classifier weights
     if not shared_classifier:
-        serialize_fp32(out_file, model.output_heads[0].weight)
+        serialize_fp32(out_file, model.output.weight)
 
     # write to binary file
     out_file.close()

@@ -23,7 +23,12 @@ class ModelArgs:
     norm_eps: float = 1e-5
     max_seq_len: int = 2048
     dropout: float = 0.0
-    num_future_tokens: int = 4  # Number of future tokens to predict per output head -- m
+    untied_head: bool = False
+    num_future_tokens: int = 4  # Number of future tokens to predict (1 + num MTPs)
+    lambda_loss: float = 0.3  # weight for scaling the loss of MTPs
+    num_mtp_layers: int = 1  # Number of transformer blocks for the MTPs
+    mtp_structure: str = "linear"  # "linear" or "tree"
+    mtp_info_merge: str = "mean"  # "concat" or "mean"
 
     def __post_init__(self):
         assert self.vocab_source in ["llama2", "custom"]
@@ -55,7 +60,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1]), f"{freqs_cis.shape} != {(x.shape[1], x.shape[-1])}"
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(shape)
 
@@ -209,6 +214,39 @@ class TransformerBlock(nn.Module):
         return out
 
 
+class MTPModule(nn.Module):
+    """Multi-Token Prediction Module that predicts tokens further in the future
+    sketch of the architecture: https://dataturbo.medium.com/deepseek-technical-analysis-3-multi-token-prediction-f8f3ea7eaf9c
+    """
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.args = args
+        self.past_info_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.current_info_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.linear_proj = nn.Linear(2 * args.dim, args.dim, bias=False)
+        self.dropout = nn.Dropout(args.dropout)
+        # more transformers blocks for the MTP
+        self.mtp_layers = nn.ModuleList([
+            TransformerBlock(i, args) for i in range(args.num_mtp_layers)
+        ])
+
+    def forward(self, current_info: torch.Tensor, past_info: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor) -> torch.Tensor:
+        """
+        current_info: (batch_size, seq_len, dim)
+            - the shifted embeddings freshly from the shared embedding table
+        past_info: (batch_size, seq_len, dim)
+            - the past info is the output of the last transformer block of the main model or the previous MTP module
+        """
+        past_info = self.past_info_norm(past_info)
+        current_info = self.current_info_norm(current_info)
+        combined = torch.cat([past_info, current_info], dim=-1)
+        combined = self.linear_proj(combined)
+        combined = self.dropout(combined)
+        for layer in self.mtp_layers:
+            combined = layer(combined, freqs_cos, freqs_sin)
+        return combined
+
+
 class Transformer(nn.Module):
     last_loss: Optional[torch.Tensor]
 
@@ -217,6 +255,8 @@ class Transformer(nn.Module):
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
+        if params.num_future_tokens > 1:
+            self.loss_weighting_factor = params.lambda_loss / (params.num_future_tokens - 1)  # lambda / D   ...   from deepseek paper
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
         self.dropout = nn.Dropout(params.dropout)
@@ -224,12 +264,17 @@ class Transformer(nn.Module):
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output_heads = nn.ModuleList([
-            nn.Linear(params.dim, params.vocab_size, bias=False)
-            for _ in range(params.num_future_tokens)
+
+        # add the MTP modules
+        self.mtp_modules = nn.ModuleList([
+            MTPModule(params) for _ in range(params.num_future_tokens - 1)
         ])
+
+        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+
         # share the unembedding parameters with the embedding parameters
-        # COMMENTED: self.tok_embeddings.weight = self.output_heads[0].weight # https://paperswithcode.com/method/weight-tying
+        if not params.untied_head:
+            self.tok_embeddings.weight = self.output.weight # https://paperswithcode.com/method/weight-tying
 
         # some useful precompute for the RoPE relative positional embeddings
         freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
@@ -256,37 +301,64 @@ class Transformer(nn.Module):
 
     def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
-        h = self.tok_embeddings(tokens)
-        h = self.dropout(h)
-        freqs_cos = self.freqs_cos[:seqlen]
-        freqs_sin = self.freqs_sin[:seqlen]
+        embeddings = self.tok_embeddings(tokens)
+        embeddings = self.dropout(embeddings)
 
+        # If we are training and we have multiple future tokens to predict, we need to cut the seq-related variables to the window size
+        if self.params.num_future_tokens > 1 and targets is not None:
+            window_size = seqlen - self.params.num_future_tokens
+            h = embeddings[:, :window_size, :]
+            freqs_cos = self.freqs_cos[:window_size]
+            freqs_sin = self.freqs_sin[:window_size]
+        else:
+            window_size = seqlen
+            h = embeddings
+            freqs_cos = self.freqs_cos[:seqlen]
+            freqs_sin = self.freqs_sin[:seqlen]
+
+        # Compute the main model's hidden states
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
-        h = self.norm(h)
+
+        normed_h = self.norm(h)
+        main_model_output = self.output(normed_h) # TODO: Norm here or not?
 
         if targets is not None:
-            # Get predictions from each head
-            all_logits = []
-            for head in self.output_heads:
-                logits = head(h)  # Shape: [batch_size, seq_len, vocab_size]
-                all_logits.append(logits)
+            if self.params.num_future_tokens > 1:
+                # Get predictions from each Module
+                all_logits = [main_model_output]
+                last_mtp_out = h
+                for k, mtp_module in enumerate(self.mtp_modules, 1):
+                    last_mtp_out = mtp_module(embeddings[:, k:window_size+k], last_mtp_out, freqs_cos, freqs_sin)
+                    all_logits.append(self.output(last_mtp_out))
 
-            # Stack logits: (batch_size, seq_len, num_predictions, vocab_size)
-            stacked_logits = torch.stack(all_logits, dim=2)
+                # Stack logits: (batch_size, seq_len, num_predictions, vocab_size)
+                stacked_logits = torch.stack(all_logits, dim=2)
+                assert stacked_logits.shape == (_bsz, window_size, self.params.num_future_tokens, self.vocab_size), f"{stacked_logits.shape} != {(_bsz, window_size, self.params.num_future_tokens, self.vocab_size)}"
+                assert targets.shape == (_bsz, window_size, self.params.num_future_tokens), f"{targets.shape} != {(_bsz, window_size, self.params.num_future_tokens)}"
 
-            # Calculate loss across all predictions
-            loss_fct = nn.CrossEntropyLoss()
-            logits_reshaped = stacked_logits.view(-1, self.vocab_size)
-            targets_reshaped = targets.view(-1)
-            self.last_loss = loss_fct(logits_reshaped, targets_reshaped)
+                # Calculate loss across all predictions
+                loss_fct = nn.CrossEntropyLoss()
+                losses = []
+                for i in range(self.params.num_future_tokens):
+                    logits_reshaped = stacked_logits[:, :, i, :].view(-1, self.vocab_size)
+                    targets_reshaped = targets[:, :, i].view(-1)
+                    losses.append(loss_fct(logits_reshaped, targets_reshaped))
+                mtp_loss = self.loss_weighting_factor * sum(losses[1:])
+                self.last_loss = losses[0] + mtp_loss
 
-            return stacked_logits
+                return stacked_logits
+
+            else:
+                logits = main_model_output
+                self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+                return logits
+
         else:
             # inference-time: only forward the output on the very last position
             # and only use the first head
             last_h = h[:, [-1], :]  # (batch_size, 1, dim)
-            logits = self.output_heads[0](last_h)  # (batch_size, 1, vocab_size)
+            logits = self.output(last_h)  # (batch_size, 1, vocab_size)
             self.last_loss = None
             return logits
 
@@ -363,3 +435,217 @@ class Transformer(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+
+#### Experiment with Tree of MTPs
+class MTPInfoMerge(nn.Module):
+    """
+    This module is used in the TreeMTPModule to merge the past hidden states of the main module and the MTPs.
+
+    The possible merging strategies so far are:
+    - "concat": concatenate the past hidden states of the main module and the MTPs and project to the original dimension
+    - "mean": average the past hidden states of the main module and the MTPs
+    """
+    def __init__(self, args: ModelArgs, module_index: int):
+        super().__init__()
+        self.args = args
+        self.module_index = module_index
+
+        if args.mtp_info_merge == "concat":
+            if module_index > 1:
+                self.past_combine_proj = nn.Linear((module_index) * args.dim, args.dim)
+            else:
+                pass
+        elif args.mtp_info_merge == "mean":
+            pass
+        else:
+            raise ValueError(f"Invalid mtp_info_merge: {args.mtp_info_merge}")
+
+    def forward(self, past_hidden_states: list[torch.Tensor]) -> torch.Tensor:
+        if self.module_index <= 1:
+            return past_hidden_states[0]
+
+        if self.args.mtp_info_merge == "concat":
+            cat_hidden = torch.cat(past_hidden_states, dim=-1)
+            # print(f"cat_hidden.shape: {cat_hidden.shape}")
+            # print(f"all past_hidden_states.shape: {[h.shape for h in past_hidden_states]}")
+            return self.past_combine_proj(cat_hidden)
+
+        elif self.args.mtp_info_merge == "mean":
+            mean_hidden = torch.mean(torch.stack(past_hidden_states, dim=0), dim=0) # TODO: Check if this is correct (should be)
+            return mean_hidden
+
+
+class TreeMTPModule(nn.Module):
+    """
+    Enhanced MTP module that aggregates information from all previous modules including the main model
+    The idea is to get even more gradients to the main model and to do it directly.
+    """
+    def __init__(self, args: ModelArgs, module_index: int):
+        super().__init__()
+        self.args = args
+        self.module_index = module_index  # 0 is main model, 1 and up are MTP modules
+        self.past_info_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.current_info_norm = RMSNorm(args.dim, eps=args.norm_eps)
+
+        # Layer for combining past hidden states
+        self.past_combine_proj = MTPInfoMerge(args, module_index)
+
+        # Main processing components
+        self.linear_proj = nn.Linear(2 * args.dim, args.dim)
+        self.mtp_layers = nn.ModuleList([
+            TransformerBlock(i, args) for i in range(args.num_mtp_layers)
+        ])
+
+
+    def forward(self, current_info: torch.Tensor, past_hidden_states: list[torch.Tensor],
+                freqs_cos: torch.Tensor, freqs_sin: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            current_info: token embeddings shifted according to module position
+            past_hidden_states: list of hidden states from all previous modules
+            freqs_cos, freqs_sin: positional encoding tensors
+        """
+        # Align and combine past hidden states
+        aligned_states = self._align_hidden_states(past_hidden_states)
+        combined_past = self.past_combine_proj(aligned_states)
+
+        # Normal MTP processing
+        past_info = self.past_info_norm(combined_past)
+        current_info = self.current_info_norm(current_info)
+        combined = torch.cat([past_info, current_info], dim=-1)
+        x = self.linear_proj(combined)
+
+        # Process through transformer layers
+        for layer in self.mtp_layers:
+            x = layer(x, freqs_cos, freqs_sin)
+
+        return x
+
+    def _align_hidden_states(self, past_hidden_states: list[torch.Tensor]) -> torch.Tensor:
+        """
+        Aligns hidden states from different modules to match current positions.
+        Each module processes a different window of the sequence, so we need to
+        align them properly before combining.
+        """
+        batch_size = past_hidden_states[0].shape[0]
+        seq_len = past_hidden_states[0].shape[1]
+
+        # Align each hidden state based on its module position
+        aligned_states = []
+        for idx, hidden_states in enumerate(past_hidden_states):
+            # Calculate position shift based on module index difference
+            pos_shift = self.module_index - idx - 1 # -1 because there is no shift between neighboring modules and module_index starts at 1
+
+            if pos_shift > 0:
+                # Need to shift hidden state backward and pad at the end
+                aligned = hidden_states[:, pos_shift:]
+                pad_length = pos_shift
+                padding = torch.zeros(batch_size, pad_length, self.args.dim, device=hidden_states.device)
+                aligned = torch.cat([aligned, padding], dim=1)
+            else:
+                aligned = hidden_states
+
+            aligned_states.append(aligned)
+
+        # Concatenate all aligned states along feature dimension
+        return aligned_states
+
+
+class TreeTransformer(Transformer):
+    """Main transformer model with tree-structured MTP modules"""
+    def __init__(self, params: ModelArgs):
+        # init not the father but the grandfather
+        super(Transformer, self).__init__()
+        assert params.num_future_tokens > 2, "Tree structure requires at least 3 future tokens (otherwise linear or simple)"
+        self.params = params
+        self.vocab_size = params.vocab_size
+        self.weighting_factor = params.lambda_loss / (params.num_future_tokens - 1)  # lambda / D   ...   from deepseek paper
+
+
+        # The main model as in Transformer
+        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
+        self.dropout = nn.Dropout(params.dropout)
+        self.layers = torch.nn.ModuleList()
+        for layer_id in range(params.n_layers):
+            self.layers.append(TransformerBlock(layer_id, params))
+        self.norm = RMSNorm(params.dim, eps=params.norm_eps)
+
+        # Tree-structured MTP modules
+        self.mtp_modules = nn.ModuleList([
+            TreeMTPModule(params, module_index=i+1)
+            for i in range(params.num_future_tokens - 1)
+        ])
+
+        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+
+        # share the unembedding parameters with the embedding parameters
+        if not params.untied_head:
+            self.tok_embeddings.weight = self.output.weight # https://paperswithcode.com/method/weight-tying
+
+        # some useful precompute for the RoPE relative positional embeddings
+        freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('w3.weight') or pn.endswith('wo.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * params.n_layers))
+
+        # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
+        self.last_loss = None
+
+
+    def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
+        _bsz, seqlen = tokens.shape
+
+        if targets is not None:
+            window_size = seqlen - self.params.num_future_tokens
+
+            # Get embeddings for all positions
+            embeddings = self.tok_embeddings(tokens)
+            embeddings = self.dropout(embeddings)
+
+            # Process main model
+            h = embeddings[:, :window_size, :]
+            freqs_cos = self.freqs_cos[:window_size]
+            freqs_sin = self.freqs_sin[:window_size]
+
+            for layer in self.layers:
+                h = layer(h, freqs_cos, freqs_sin)
+            main_model_output = self.norm(h)
+
+            # Store all hidden states adn logits for tree structure
+            all_hidden_states = [main_model_output]
+            all_logits = [self.output(main_model_output)]
+
+            # Process MTP modules in tree structure
+            for i, mtp_module in enumerate(self.mtp_modules, 1):
+                current_tokens = embeddings[:, i:window_size+i]
+                mtp_output = mtp_module(current_tokens, all_hidden_states, freqs_cos, freqs_sin)
+
+                all_hidden_states.append(mtp_output)
+                all_logits.append(self.output(mtp_output))
+
+            stacked_logits = torch.stack(all_logits, dim=2)
+            assert stacked_logits.shape == (_bsz, window_size, self.params.num_future_tokens, self.vocab_size), f"{stacked_logits.shape} != {(_bsz, window_size, self.params.num_future_tokens, self.vocab_size)}"
+            assert targets.shape == (_bsz, window_size, self.params.num_future_tokens), f"{targets.shape} != {(_bsz, window_size, self.params.num_future_tokens)}"
+
+            # Compute losses with dynamic weighting
+            loss_fct = nn.CrossEntropyLoss()
+            losses = []
+            for i in range(self.params.num_future_tokens):
+                logits_reshaped = stacked_logits[:, :, i, :].view(-1, self.vocab_size)
+                targets_reshaped = targets[:, :, i].view(-1)
+                losses.append(loss_fct(logits_reshaped, targets_reshaped))
+            mtp_loss = self.weighting_factor * sum(losses[1:])
+            self.last_loss = losses[0] + mtp_loss
+
+            return stacked_logits
+
+        else:
+            # Inference mode - similar to original implementation
+            return super().forward(tokens, targets)
